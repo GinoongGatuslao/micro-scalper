@@ -1,0 +1,12 @@
+[project]
+name = "micro-scalper"
+version = "0.1.0"
+description = "Production-minded Binance Spot micro scalper MVP"
+requires-python = ">=3.11"
+dependencies = [
+  "websockets>=12,<16",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
