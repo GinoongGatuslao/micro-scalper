@@ -10,6 +10,8 @@ class RiskConfig:
     max_open_orders: int
     daily_max_loss_usd: float
     per_trade_risk_usd: float
+    starting_capital_usd: float
+    max_drawdown_pct: float
     sl_bps: float
 
 
@@ -23,8 +25,10 @@ class RiskManager:
     def __init__(self, config: RiskConfig) -> None:
         self._config = config
         self._realized_pnl_today = 0.0
+        self._realized_pnl_cumulative = 0.0
         self._current_day = self._today()
         self._kill_switch = False
+        self._starting_capital = max(0.0, float(config.starting_capital_usd))
 
     @property
     def realized_pnl_today(self) -> float:
@@ -39,7 +43,10 @@ class RiskManager:
     def record_realized_pnl(self, pnl_usd: float) -> None:
         self._roll_day()
         self._realized_pnl_today += pnl_usd
+        self._realized_pnl_cumulative += pnl_usd
         if self._realized_pnl_today <= -abs(self._config.daily_max_loss_usd):
+            self._kill_switch = True
+        if self._starting_capital > 0 and self.drawdown_pct >= abs(self._config.max_drawdown_pct):
             self._kill_switch = True
 
     def can_open_entry(self, position_notional_usd: float, open_orders: int, proposed_notional_usd: float) -> RiskDecision:
@@ -64,10 +71,12 @@ class RiskManager:
     def position_size_from_risk(self, price: float) -> float:
         if price <= 0:
             return 0.0
-        if self._config.sl_bps <= 0:
-            return self._config.max_position_usd / price
-        risk_fraction = self._config.sl_bps / 10_000
-        size_by_risk = self._config.per_trade_risk_usd / (price * risk_fraction)
+        risk_fraction = self._config.sl_bps / 10_000 if self._config.sl_bps > 0 else 0.0
+        risk_budget_usd = max(
+            self._config.per_trade_risk_usd,
+            0.02 * self._starting_capital if self._starting_capital > 0 else 0.0,
+        )
+        size_by_risk = (risk_budget_usd / (price * risk_fraction)) if risk_fraction > 0 else self._config.max_position_usd / price
         size_by_cap = self._config.max_position_usd / price
         return max(0.0, min(size_by_risk, size_by_cap))
 
@@ -77,6 +86,12 @@ class RiskManager:
             self._current_day = today
             self._realized_pnl_today = 0.0
             self._kill_switch = False
+
+    @property
+    def drawdown_pct(self) -> float:
+        if self._starting_capital <= 0:
+            return 0.0
+        return (-self._realized_pnl_cumulative / self._starting_capital) * 100 if self._realized_pnl_cumulative < 0 else 0.0
 
     @staticmethod
     def _today() -> date:

@@ -14,6 +14,29 @@ Production-minded personal-use MVP for Binance Spot, starting on testnet. The bo
 - replay mode from recorded market snapshots
 - optional human-readable console stream alongside structured logs
 
+> No live strategy can be guaranteed “100% winning.” The aggressive profile below aims for higher win rate and faster exits while capping downside so you don’t blow up the bankroll.
+
+## Aggressive Live Profile (≈$1k capital target)
+
+Set `BOT_PROFILE=agg_live` (default in `.env.example`) for a live-leaning preset tuned for more favorable setups and a controlled drawdown cap:
+
+- Entry selectivity for win rate: `SPREAD_MIN_BPS=1.2`, `IMB_MIN=1.10`, `VOL_MAX_BPS=6`, `VOL_WINDOW=12`.
+- Faster cadence but not spammy: `ENTRY_ATTEMPT_INTERVAL_MS=350`, `MAX_CONSECUTIVE_REJECTIONS=10`, maker offset = 1 tick.
+- Exit speed-ups: `ALLOW_TAKER_EXIT=true`, `EXIT_MAX_REQUOTES=8`, tight maker offsets to avoid languishing orders.
+- Risk sizing around $1k: `MAX_POSITION_USD=400`, `PER_TRADE_RISK_USD=20` (≈2% of capital at $1k), `MAX_OPEN_ORDERS=3`.
+- Loss caps: `DAILY_MAX_LOSS_USD=80` and `MAX_DRAWDOWN_PCT=20` (kill switch if cumulative loss hits 20% of starting capital).
+
+Run (testnet endpoints by default):
+
+```bash
+BOT_PROFILE=agg_live python -m bot.run
+```
+
+Other profiles:
+
+- `balanced` (default if unset): original parameters.
+- `hf_paper`: high-frequency paper-only profile for fast iteration without live risk.
+
 ## Repo Layout
 
 ```text

@@ -82,6 +82,8 @@ async def main() -> int:
                 max_open_orders=config.max_open_orders,
                 daily_max_loss_usd=config.daily_max_loss_usd,
                 per_trade_risk_usd=config.per_trade_risk_usd,
+                starting_capital_usd=config.starting_capital_usd,
+                max_drawdown_pct=config.max_drawdown_pct,
                 sl_bps=config.sl_bps,
             )
         )
@@ -191,6 +193,7 @@ def _print_startup_diagnostics(config: AppConfig, exchange_rules: SymbolRules) -
     lines = [
         "-" * 50,
         "MARKET CONFIGURATION",
+        f"Profile: {config.profile}",
         f"Symbol: {config.symbol}",
         f"Base Asset: {exchange_rules.base_asset}",
         f"Quote Asset: {exchange_rules.quote_asset}",

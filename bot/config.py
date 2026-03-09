@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
 @dataclass(slots=True)
 class AppConfig:
+    profile: str
     symbol: str
     dry_run: bool
     paper_trading: bool
@@ -46,6 +47,8 @@ class AppConfig:
     max_open_orders: int
     daily_max_loss_usd: float
     per_trade_risk_usd: float
+    starting_capital_usd: float
+    max_drawdown_pct: float
     sl_bps: float
     order_poll_interval: float
     balance_snapshot_interval: float
@@ -116,7 +119,8 @@ def load_app_config() -> AppConfig:
             return None
         return str(raw)
 
-    return AppConfig(
+    config = AppConfig(
+        profile=pick("BOT_PROFILE", "balanced").lower(),
         symbol=pick("SYMBOL", "BTCUSDT").upper(),
         dry_run=pick_bool("DRY_RUN", True),
         paper_trading=pick_bool("PAPER_TRADING", False),
@@ -155,6 +159,8 @@ def load_app_config() -> AppConfig:
         max_open_orders=int(pick("MAX_OPEN_ORDERS", "2")),
         daily_max_loss_usd=float(pick("DAILY_MAX_LOSS_USD", "8")),
         per_trade_risk_usd=float(pick("PER_TRADE_RISK_USD", "0.75")),
+        starting_capital_usd=float(pick("STARTING_CAPITAL_USD", "1000")),
+        max_drawdown_pct=float(pick("MAX_DRAWDOWN_PCT", "20")),
         sl_bps=float(pick("SL_BPS", "10")),
         order_poll_interval=float(pick("ORDER_POLL_INTERVAL", "1.0")),
         balance_snapshot_interval=float(pick("BALANCE_SNAPSHOT_INTERVAL", "300")),
@@ -169,3 +175,70 @@ def load_app_config() -> AppConfig:
         base_asset=pick_optional_str("BASE_ASSET"),
         quote_asset=pick_optional_str("QUOTE_ASSET"),
     )
+
+    return _apply_profile_overrides(config)
+
+
+def _apply_profile_overrides(config: AppConfig) -> AppConfig:
+    """
+    Profile-aware overrides for preset tuning.
+    hf_paper: aggressive high-frequency paper profile sized for ~1000 USDT virtual capital.
+    agg_live: live-leaning profile that prioritizes higher win-rate and faster exits while capping drawdown.
+    """
+    if config.profile == "hf_paper":
+        return replace(
+            config,
+            dry_run=False,  # rely on paper trading fills for realism
+            paper_trading=True,
+            spread_min_bps=min(config.spread_min_bps, 0.8),
+            imbalance_min=max(config.imbalance_min, 1.05),
+            volatility_max_bps=max(config.volatility_max_bps, 12.0),
+            volatility_window=min(config.volatility_window, 10),
+            maker_offset_ticks=min(config.maker_offset_ticks, 1),
+            offset_ticks_min=0,
+            offset_ticks_max=max(config.offset_ticks_max, 2),
+            entry_attempt_interval_ms=min(config.entry_attempt_interval_ms, 250),
+            rejection_cooldown_ms=min(config.rejection_cooldown_ms, 800),
+            max_consecutive_rejections=max(config.max_consecutive_rejections, 8),
+            allow_taker_exit=True,
+            entry_max_requotes=max(config.entry_max_requotes, 8),
+            exit_max_requotes=max(config.exit_max_requotes, 8),
+            max_spread_bps=max(config.max_spread_bps, 30.0),
+            max_position_usd=max(config.max_position_usd, 250.0),
+            max_open_orders=max(config.max_open_orders, 3),
+            daily_max_loss_usd=max(config.daily_max_loss_usd, 40.0),
+            per_trade_risk_usd=max(config.per_trade_risk_usd, 10.0),
+            starting_capital_usd=max(config.starting_capital_usd, 1000.0),
+            max_drawdown_pct=min(config.max_drawdown_pct, 20.0),
+            sim_quote_balance=max(config.sim_quote_balance, 1000.0),
+            sim_base_balance=0.0,
+        )
+
+    if config.profile == "agg_live":
+        return replace(
+            config,
+            dry_run=False,
+            paper_trading=False,
+            spread_min_bps=max(config.spread_min_bps, 1.2),
+            imbalance_min=max(config.imbalance_min, 1.10),
+            volatility_max_bps=min(config.volatility_max_bps, 6.0),
+            volatility_window=max(8, min(config.volatility_window, 20)),
+            maker_offset_ticks=min(config.maker_offset_ticks, 1),
+            offset_ticks_min=0,
+            offset_ticks_max=max(config.offset_ticks_max, 2),
+            entry_attempt_interval_ms=min(config.entry_attempt_interval_ms, 350),
+            rejection_cooldown_ms=min(config.rejection_cooldown_ms, 1000),
+            max_consecutive_rejections=max(config.max_consecutive_rejections, 10),
+            allow_taker_exit=True,
+            entry_max_requotes=max(config.entry_max_requotes, 8),
+            exit_max_requotes=max(config.exit_max_requotes, 8),
+            max_spread_bps=min(max(config.max_spread_bps, 25.0), 35.0),
+            max_position_usd=max(config.max_position_usd, 400.0),
+            max_open_orders=max(config.max_open_orders, 3),
+            daily_max_loss_usd=max(config.daily_max_loss_usd, 80.0),
+            per_trade_risk_usd=max(config.per_trade_risk_usd, 20.0),
+            starting_capital_usd=max(config.starting_capital_usd, 1000.0),
+            max_drawdown_pct=min(config.max_drawdown_pct, 20.0),
+        )
+
+    return config
