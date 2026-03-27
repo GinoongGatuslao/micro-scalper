@@ -67,6 +67,11 @@ class BinanceClient:
         self._config = config
         self._metrics = metrics
         self._book_ticker_cache: dict[str, tuple[float, float]] = {}
+        self._server_time_offset_ms = 0
+        self._server_time_synced = False
+        self._server_time_last_sync = 0.0
+        self._server_time_sync_interval_seconds = 60.0
+        self._server_time_lock = asyncio.Lock()
 
     async def get_symbol_rules(self, symbol: str) -> SymbolRules:
         payload = await self._request("GET", "/api/v3/exchangeInfo", {"symbol": symbol})
@@ -229,6 +234,43 @@ class BinanceClient:
             return f"{base}?streams={'/'.join(streams)}"
         return f"{base}/stream?streams={'/'.join(streams)}"
 
+    def _local_timestamp_ms(self) -> int:
+        return int(time.time() * 1000)
+
+    def _signed_timestamp_ms(self) -> int:
+        return self._local_timestamp_ms() + self._server_time_offset_ms
+
+    async def _fetch_server_time_ms(self) -> int:
+        payload = await self._request("GET", "/api/v3/time")
+        raw_value = payload.get("serverTime")
+        if not isinstance(raw_value, int):
+            raise RuntimeError(f"Binance /api/v3/time returned invalid serverTime: {raw_value!r}")
+        return raw_value
+
+    async def _ensure_server_time_offset(self, *, force: bool = False) -> None:
+        if not force and self._server_time_synced:
+            age = time.monotonic() - self._server_time_last_sync
+            if age < self._server_time_sync_interval_seconds:
+                return
+
+        async with self._server_time_lock:
+            if not force and self._server_time_synced:
+                age = time.monotonic() - self._server_time_last_sync
+                if age < self._server_time_sync_interval_seconds:
+                    return
+
+            server_time_ms = await self._fetch_server_time_ms()
+            local_time_ms = self._local_timestamp_ms()
+            self._server_time_offset_ms = server_time_ms - local_time_ms
+            self._server_time_synced = True
+            self._server_time_last_sync = time.monotonic()
+            LOGGER.info("Synchronized Binance server time offset offset_ms=%d", self._server_time_offset_ms)
+
+    @staticmethod
+    def _is_timestamp_outside_recv_window_error(exc: RuntimeError) -> bool:
+        message = str(exc)
+        return '"code":-1021' in message or '"code": -1021' in message
+
     async def _request(
         self,
         method: str,
@@ -238,31 +280,55 @@ class BinanceClient:
         signed: bool = False,
     ) -> dict[str, Any]:
         params = dict(params or {})
-        headers = {"X-MBX-APIKEY": self._config.api_key} if self._config.api_key else {}
         if signed:
-            params["timestamp"] = int(time.time() * 1000)
-            params["recvWindow"] = self._config.recv_window_ms
-            query = urllib.parse.urlencode(params, doseq=True)
-            signature = hmac.new(
-                self._config.api_secret.encode("utf-8"),
-                query.encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest()
-            query = f"{query}&signature={signature}"
-        else:
-            query = urllib.parse.urlencode(params, doseq=True)
+            try:
+                await self._ensure_server_time_offset()
+            except RuntimeError as exc:
+                LOGGER.warning("Unable to pre-sync Binance server time: %s", exc)
 
-        url = f"{self._config.rest_base_url.rstrip('/')}{path}"
-        if method in {"GET", "DELETE"}:
-            if query:
-                url = f"{url}?{query}"
-            body = None
-        else:
-            body = query.encode("utf-8")
-            headers["Content-Type"] = "application/x-www-form-urlencoded"
+        attempts = 2 if signed else 1
+        last_error: RuntimeError | None = None
+        for attempt in range(attempts):
+            request_params = dict(params)
+            headers = {"X-MBX-APIKEY": self._config.api_key} if self._config.api_key else {}
+            if signed:
+                request_params["timestamp"] = self._signed_timestamp_ms()
+                request_params["recvWindow"] = self._config.recv_window_ms
+                query = urllib.parse.urlencode(request_params, doseq=True)
+                signature = hmac.new(
+                    self._config.api_secret.encode("utf-8"),
+                    query.encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest()
+                query = f"{query}&signature={signature}"
+            else:
+                query = urllib.parse.urlencode(request_params, doseq=True)
 
-        request = urllib.request.Request(url=url, method=method, data=body, headers=headers)
-        return await asyncio.to_thread(self._execute_request, request)
+            url = f"{self._config.rest_base_url.rstrip('/')}{path}"
+            if method in {"GET", "DELETE"}:
+                if query:
+                    url = f"{url}?{query}"
+                body = None
+            else:
+                body = query.encode("utf-8")
+                headers["Content-Type"] = "application/x-www-form-urlencoded"
+
+            request = urllib.request.Request(url=url, method=method, data=body, headers=headers)
+            try:
+                return await asyncio.to_thread(self._execute_request, request)
+            except RuntimeError as exc:
+                if not signed or attempt > 0 or not self._is_timestamp_outside_recv_window_error(exc):
+                    raise
+                LOGGER.warning("Binance timestamp outside recvWindow; forcing server time resync and retrying once.")
+                try:
+                    await self._ensure_server_time_offset(force=True)
+                except RuntimeError as sync_exc:
+                    LOGGER.warning("Unable to refresh Binance server time after -1021: %s", sync_exc)
+                last_error = exc
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Binance request failed unexpectedly without error details.")
 
     @staticmethod
     def _execute_request(request: urllib.request.Request) -> dict[str, Any]:
@@ -536,3 +602,4 @@ class PaperTradingClient:
         if self._current_market is not None:
             return self._current_market.event_time
         return utc_now()
+
